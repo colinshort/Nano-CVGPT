@@ -5,7 +5,7 @@ from layers import ComplexLinear, ComplexDropout
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, n_embed, n_head, attn_dropout=0, bias=True, sm_variante='real', device='cpu'):
+    def __init__(self, n_embed, n_head, attn_dropout=0, bias=True, sm_variante='realip', device='cpu'):
         super().__init__()
         self.sm_variante = sm_variante
         self.n_embed = n_embed
@@ -13,7 +13,6 @@ class MultiHeadAttention(nn.Module):
         self.attn_dropout = attn_dropout
         self.head_size = n_embed // n_head
         self.device = device
-        print(f'n_embed: {n_embed}, n_head: {n_head}, head_size: {self.head_size}')
         assert self.head_size * n_head == self.n_embed, "n_embed must be divisible by n_head"
         self.scaling = self.head_size ** -0.5
         self.in_proj_q = ComplexLinear(n_embed, n_embed, bias=bias)
@@ -25,16 +24,14 @@ class MultiHeadAttention(nn.Module):
         self.product = self.sm_variante[-2:]
         self.sm_variante = self.sm_variante[:-2]
 
-    def forward(self, query, key, value, attn_mask=None):
+    def forward(self, x):
+        batch_size, input_len, n_embed = x.size()
 
-        batch_size, target_len, n_embed = query.size()
-        _, input_len, _ = key.size()
+        q = self.in_proj_q(x)
+        k = self.in_proj_k(x)
+        v = self.in_proj_v(x)
 
-        q = self.in_proj_q(query)
-        k = self.in_proj_k(key)
-        v = self.in_proj_v(value)
-
-        q = q.transpose(1, 0).contiguous().view(target_len, batch_size * self.n_head, self.head_size).transpose(1, 0)
+        q = q.transpose(1, 0).contiguous().view(input_len, batch_size * self.n_head, self.head_size).transpose(1, 0)
         k = k.transpose(1, 0).contiguous().view(input_len, batch_size * self.n_head, self.head_size).transpose(1, 0)
         v = v.transpose(1, 0).contiguous().view(input_len, batch_size * self.n_head, self.head_size).transpose(1, 0)
 
@@ -45,14 +42,16 @@ class MultiHeadAttention(nn.Module):
         else:
             raise ValueError(f'{self.product} is not a valid argument')
 
+
+        attn_mask = self.generate_square_subsequent_mask(x.shape[1])
         attn_weights = self.softmax_variants(attn_weights, attn_mask=attn_mask, sm_variante=self.sm_variante)
         attn_weights = self.cdropout(attn_weights)
         attn = torch.bmm(attn_weights, v)
 
-        attn = attn.transpose(1, 0).contiguous().view(target_len, batch_size, self.n_embed).transpose(1, 0)
+        attn = attn.transpose(1, 0).contiguous().view(input_len, batch_size, self.n_embed).transpose(1, 0)
         attn = self.out_proj(attn)
 
-        return attn, attn_weights
+        return attn
 
     def softmax_variants(self, input, attn_mask=None, sm_variante='real'):
         if sm_variante == 'real':
@@ -113,3 +112,8 @@ class MultiHeadAttention(nn.Module):
         maxi = torch.take_along_dim(input, torch.argmax(torch.abs(pos), dim=-1, keepdims=True), dim=-1).unsqueeze(-1)
         return pos / maxi
 
+    def generate_square_subsequent_mask(self, sz):
+        mask = (torch.triu(torch.ones((sz, sz))) == 1).transpose(0, 1)
+        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+        return torch.complex(mask, mask)
+    

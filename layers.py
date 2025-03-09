@@ -2,6 +2,17 @@ import torch
 import torch.nn as nn
 
 
+class ComplexEmbedding(nn.Module):
+    def __init__(self, num_embeddings, embedding_dim):
+        super(ComplexEmbedding, self).__init__()
+        self.real_embedding = nn.Embedding(num_embeddings, embedding_dim)
+        self.imag_embedding = nn.Embedding(num_embeddings, embedding_dim)
+
+    def forward(self, indices):
+        real_part = self.real_embedding(indices)
+        imag_part = self.imag_embedding(indices)
+        return torch.complex(real_part, imag_part)
+
 class ComplexLinear(nn.Module):
     def __init__(
             self,
@@ -15,8 +26,8 @@ class ComplexLinear(nn.Module):
         self.out_features = out_features
         self.bias = bias
 
-        self.Linear_real = torch.nn.Linear(in_features, out_features, bias=bias)
-        self.Linear_img = torch.nn.Linear(in_features, out_features, bias=bias)
+        self.Linear_real = nn.Linear(in_features, out_features, bias=bias)
+        self.Linear_img = nn.Linear(in_features, out_features, bias=bias)
 
     def forward(self, input):
         real_real = self.Linear_real(input.real)

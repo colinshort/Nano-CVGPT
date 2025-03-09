@@ -87,25 +87,25 @@ m = model.to(device) # send model to gpu
 # print number of parameters in the model
 print(sum(p.numel() for p in model.parameters() if p.requires_grad)/1e6, 'M parameters')
 
-# # create PyTorch Optimizer
-# optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate) # backprop algorithm
+# create PyTorch Optimizer
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate) # backprop algorithm
 
-# # training loop
-# for step in range(max_iters):
-#   # evaluate the loss on the training and testing steps on a given interval
-#   if step % eval_interval == 0:
-#     losses = estimate_loss()
-#     print(f"Step {step}: Train loss {losses['train']:.4f}, Test loss {losses['test']:.4f}")
+# training loop
+for step in range(max_iters):
+  # evaluate the loss on the training and testing steps on a given interval
+  if step % eval_interval == 0:
+    losses = estimate_loss()
+    print(f"Step {step} out of {max_iters}: Train loss {losses['train']:.4f}, Test loss {losses['test']:.4f}")
 
-#   # get batch
-#   x_batch, y_batch = get_batch('train')
+  # get batch
+  x_batch, y_batch = get_batch('train')
 
-#   # forward pass
-#   logits, loss = model(x_batch, y_batch)
-#   optimizer.zero_grad(set_to_none=True)
-#   loss.backward()
-#   optimizer.step()
+  # forward pass
+  logits, loss = model(x_batch, y_batch)
+  optimizer.zero_grad(set_to_none=True)
+  loss.backward()
+  optimizer.step()
 
-# # generate from the model
-# context = torch.zeros((1, 1), dtype=torch.long, device=device)
-# print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
+# generate from the model
+context = torch.zeros((1, 1), dtype=torch.long, device=device)
+print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))

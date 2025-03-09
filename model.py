@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from layers import ComplexLinear, ComplexLayerNorm
+from layers import ComplexEmbedding, ComplexLinear, ComplexLayerNorm
 from components import ComplexBlock
 from positional_encoding import positional_encoding
 
@@ -21,10 +21,10 @@ class CVGPT(nn.Module):  # Transformer for sequence generation
         # self.token_embedding_table = nn.Embedding(self.vocab_size, self.n_embed)
         # self.position_embedding_table = nn.Embedding(self.block_size, self.n_embed)
 
-        self.in_embedding = ComplexLinear(self.vocab_size, self.n_embed)
-        self.pos_enc = positional_encoding(embed_dim=self.n_embed, device=self.device)
-        self.blocks = nn.Sequential(*[ComplexBlock(self.n_embed, self.n_head, self.dropout) for _ in range(self.n_layer)])
-        self.ln_f = ComplexLayerNorm(self.n_embed) # final layer norm
+        self.in_embedding = ComplexEmbedding(self.vocab_size, self.n_embed)
+        self.pos_enc = positional_encoding(self.n_embed, device=self.device)
+        self.blocks = nn.Sequential(*[ComplexBlock(self.n_embed, self.n_head, self.dropout, device=self.device) for _ in range(self.n_layer)])
+        self.ln_f = ComplexLayerNorm(self.n_embed, device=device) # final layer norm
         self.lm_head = ComplexLinear(self.n_embed, self.vocab_size)
 
         # self.apply(self._init_weights)
@@ -45,17 +45,19 @@ class CVGPT(nn.Module):  # Transformer for sequence generation
         # pos_emb = self.position_embedding_table(torch.arange(T, device=self.device)) # (T,C)
         # x = tok_emb + pos_emb # (B,T,C)
 
-        x = self.in_embedding(idx) + self.pos_enc(torch.arange(T))
+        tok_emb = self.in_embedding(idx)
+        pos_emb = self.pos_enc(torch.arange(T))
+        x = tok_emb + pos_emb.type(torch.complex64)
         x = self.blocks(x) # (B,T,C)
         x = self.ln_f(x) # (B,T,C)
-        logits = self.lm_head(x) # (B,T,vocab_size)
+        logits = self.lm_head(x).real # (B,T,vocab_size)
 
         if targets is None:
             loss = None
         else:
             B, T, C = logits.shape
-            logits = logits.view(B*T, C)
-            targets = targets.view(B*T)
+            logits = logits.view(B * T, C)
+            targets = targets.view(B * T)
             loss = F.cross_entropy(logits, targets)
 
         return logits, loss
