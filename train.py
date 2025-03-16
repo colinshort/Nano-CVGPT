@@ -22,7 +22,7 @@ else:
   print("Using CPU with", torch.get_num_threads(), "threads.")
 
 # get our data
-with open('shakespeare.txt', 'r', encoding='utf-8') as f:
+with open('data/shakespeare.txt', 'r', encoding='utf-8') as f:
     text = f.read()
 
 # get sorted list of all unique characters in the text

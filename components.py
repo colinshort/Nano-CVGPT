@@ -17,11 +17,10 @@ class ComplexBlock(nn.Module):
   def forward(self, x):
     x = x + self.sa_heads(self.ln1(x))
     x = x + self.ffwd(self.ln2(x))
-    return x
-  
+    return x  
 
 class ComplexFeedForward(nn.Module):
-  """ simple linear layyer followed by a non-linearity """
+  """ Simple linear layer followed by a non-linearity """
   def __init__(self, n_embed, dropout, device='cpu'):
     super().__init__()
     self.net = nn.Sequential(

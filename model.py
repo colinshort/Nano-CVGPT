@@ -1,9 +1,8 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from layers import ComplexEmbedding, ComplexLinear, ComplexLayerNorm
+from layers import AdaptiveEmbedding, ComplexLinear, ComplexLayerNorm
 from components import ComplexBlock
-from positional_encoding import positional_encoding
 
 
 class CVGPT(nn.Module):  # Transformer for sequence generation
@@ -17,37 +16,17 @@ class CVGPT(nn.Module):  # Transformer for sequence generation
         self.dropout = dropout
         self.device = device
 
-        # each token directly reads off the logits for the next token from a lookup table
-        # self.token_embedding_table = nn.Embedding(self.vocab_size, self.n_embed)
-        # self.position_embedding_table = nn.Embedding(self.block_size, self.n_embed)
-
-        self.in_embedding = ComplexEmbedding(self.vocab_size, self.n_embed)
-        self.pos_enc = positional_encoding(self.n_embed, device=self.device)
+        # learned embedding that is a function of token index and position
+        self.embedding = AdaptiveEmbedding(vocab_size, n_embed, d_proj=n_embed, cutoffs=[], div_val=1)
         self.blocks = nn.Sequential(*[ComplexBlock(self.n_embed, self.n_head, self.dropout, device=self.device) for _ in range(self.n_layer)])
         self.ln_f = ComplexLayerNorm(self.n_embed, device=device) # final layer norm
         self.lm_head = ComplexLinear(self.n_embed, self.vocab_size)
-
-        # self.apply(self._init_weights)
-
-    # def _init_weights(self, module):
-    #     if isinstance(module, ComplexLinear):
-    #         torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-    #         if module.bias is not None:
-    #             torch.nn.init.zeros_(module.bias)
-    #     elif isinstance(module, nn.Embedding):
-    #         torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
 
         # idx and targets are both (B,T) tensor of integers
-        # tok_emb = self.token_embedding_table(idx) # (B,T,C)
-        # pos_emb = self.position_embedding_table(torch.arange(T, device=self.device)) # (T,C)
-        # x = tok_emb + pos_emb # (B,T,C)
-
-        tok_emb = self.in_embedding(idx)
-        pos_emb = self.pos_enc(torch.arange(T))
-        x = tok_emb + pos_emb.type(torch.complex64)
+        x = self.embedding(idx)
         x = self.blocks(x) # (B,T,C)
         x = self.ln_f(x) # (B,T,C)
         logits = self.lm_head(x).real # (B,T,vocab_size)

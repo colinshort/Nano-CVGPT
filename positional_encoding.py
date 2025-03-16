@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-
+# Sinusoidal positional encoding
 class positional_encoding(nn.Module):
     def __init__(self, n_embed, max_freq=10000, device='cpu'):
 

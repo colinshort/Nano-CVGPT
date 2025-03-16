@@ -97,7 +97,7 @@ class MultiHeadAttention(nn.Module):
         maxi = torch.max(real, dim=-1)[0].unsqueeze(-1)
         return ((real - mini) / (maxi - mini)).type(torch.complex64)
 
-    def min_max_naiv(self, input, attn_mask=None):  # attnmaks does not work yet
+    def min_max_naiv(self, input, attn_mask=None):  # attnmask does not work yet
         real = torch.real(input)
         rmini = torch.min(real, dim=-1)
         rmaxi = torch.max(real, dim=-1)
