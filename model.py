@@ -26,7 +26,7 @@ class CVGPT(nn.Module):  # Transformer for sequence generation
         B, T = idx.shape
 
         # idx and targets are both (B,T) tensor of integers
-        x = self.embedding(idx)
+        x = self.embedding(idx).type(torch.complex64) # (B,T,C)
         x = self.blocks(x) # (B,T,C)
         x = self.ln_f(x) # (B,T,C)
         logits = self.lm_head(x).real # (B,T,vocab_size)
