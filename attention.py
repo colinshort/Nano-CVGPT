@@ -1,119 +1,148 @@
+import sys
+import math
+import functools
+
+import numpy as np
+
 import torch
-from torch import nn
-from torch.nn.functional import softmax
-from layers import ComplexLinear, ComplexDropout
+import torch.nn as nn
+import torch.nn.functional as F
 
 
-class MultiHeadAttention(nn.Module):
-    def __init__(self, n_embed, n_head, attn_dropout=0, bias=True, sm_variante='realip', device='cpu'):
-        super().__init__()
-        self.sm_variante = sm_variante
-        self.n_embed = n_embed
+class RelPartialLearnableMultiHeadAttn(nn.Module):
+    def __init__(self, n_head, n_embed, d_head, dropout, dropatt=0, pre_lnorm=False):
+        super(RelPartialLearnableMultiHeadAttn, self).__init__()
+
         self.n_head = n_head
-        self.attn_dropout = attn_dropout
-        self.head_size = n_embed // n_head
-        self.device = device
-        assert self.head_size * n_head == self.n_embed, "n_embed must be divisible by n_head"
-        self.scaling = self.head_size ** -0.5
-        self.in_proj_q = ComplexLinear(n_embed, n_embed, bias=bias)
-        self.in_proj_k = ComplexLinear(n_embed, n_embed, bias=bias)
-        self.in_proj_v = ComplexLinear(n_embed, n_embed, bias=bias)
-        self.out_proj = ComplexLinear(n_embed, n_embed, bias=bias)
+        self.d_head = d_head
+        self.n_embed = n_embed
+        self.scale = 1 / (d_head ** 0.5)
+        self.pre_lnorm = pre_lnorm
 
-        self.cdropout = ComplexDropout(attn_dropout)
-        self.product = self.sm_variante[-2:]
-        self.sm_variante = self.sm_variante[:-2]
+        self.qkv_net = nn.Linear(n_embed, 3 * n_head * d_head, bias=False)
+        self.qkv_net1 = nn.Linear(n_embed, 3 * n_head * d_head, bias=False)
+        self.r_net = nn.Linear(n_embed, n_head * d_head, bias=False)
+        self.o_net = nn.Linear(n_head * d_head, n_embed, bias=False)
+        self.o_net1 = nn.Linear(n_head * d_head, n_embed, bias=False)
 
-    def forward(self, x):
-        batch_size, input_len, n_embed = x.size()
+        self.drop = nn.Dropout(dropout)
+        self.dropatt = nn.Dropout(dropatt)
+        self.layer_norm = nn.LayerNorm(n_embed)
 
-        q = self.in_proj_q(x)
-        k = self.in_proj_k(x)
-        v = self.in_proj_v(x)
+    def _rel_shift(self, x):
+        zero_pad = torch.zeros((x.size(0), 1, *x.size()[2:]), device=x.device, dtype=x.dtype)
+        x_padded = torch.cat([zero_pad, x], dim=1)
+        x_padded = x_padded.view(x.size(1) + 1, x.size(0), *x.size()[2:])
+        x = x_padded[1:].view_as(x)
+        return x
 
-        q = q.transpose(1, 0).contiguous().view(input_len, batch_size * self.n_head, self.head_size).transpose(1, 0)
-        k = k.transpose(1, 0).contiguous().view(input_len, batch_size * self.n_head, self.head_size).transpose(1, 0)
-        v = v.transpose(1, 0).contiguous().view(input_len, batch_size * self.n_head, self.head_size).transpose(1, 0)
+    def forward(self, w_real, w_phase, r, r_w_bias, r_r_bias, attn_mask=None, mems=None, mems_phase=None):
+        qlen, rlen, bsz = w_real.size(0), r.size(0), w_real.size(1)
 
-        if self.product == 'cp':
-            attn_weights = torch.bmm(q, k.transpose(1, 2)) * self.scaling
-        elif self.product == 'ip':
-            attn_weights = torch.bmm(q, torch.conj_physical(k).transpose(1, 2)) * self.scaling
+        if mems is not None:
+            cat_real = torch.cat([mems, w_real], 0)
+            cat_phase = torch.cat([mems_phase, w_phase], 0)
+            if self.pre_lnorm:
+                w_heads_real = self.qkv_net(self.layer_norm(cat_real))
+                w_heads_phase = self.qkv_net1(self.layer_norm(cat_phase))
+            else:
+                w_heads_real = self.qkv_net(cat_real)
+                w_heads_phase = self.qkv_net1(cat_phase)
+            r_head_k = self.r_net(r)
+            w_head_q_real, w_head_k_real, w_head_v_real = torch.chunk(w_heads_real, 3, dim=-1)
+            w_head_q_phase, w_head_k_phase, w_head_v_phase = torch.chunk(w_heads_phase, 3, dim=-1)
+            w_head_q_real = w_head_q_real[-qlen:]
+            w_head_q_phase = w_head_q_phase[-qlen:]
         else:
-            raise ValueError(f'{self.product} is not a valid argument')
+            if self.pre_lnorm:
+                w_heads_real = self.qkv_net(self.layer_norm(w_real))
+                w_heads_phase = self.qkv_net1(self.layer_norm(w_phase))
+            else:
+                w_heads_real = self.qkv_net(w_real)
+                w_heads_phase = self.qkv_net1(w_phase)
+            r_head_k = self.r_net(r)
+            w_head_q_real, w_head_k_real, w_head_v_real = torch.chunk(w_heads_real, 3, dim=-1)
+            w_head_q_phase, w_head_k_phase, w_head_v_phase = torch.chunk(w_heads_phase, 3, dim=-1)
 
+        klen = w_head_k_real.size(0)
 
-        attn_mask = self.generate_square_subsequent_mask(x.shape[1])
-        attn_weights = self.softmax_variants(attn_weights, attn_mask=attn_mask, sm_variante=self.sm_variante)
-        attn_weights = self.cdropout(attn_weights)
-        attn = torch.bmm(attn_weights, v)
+        w_head_q_real = w_head_q_real.view(qlen, bsz, self.n_head, self.d_head)  # qlen x bsz x n_head x d_head
+        w_head_q_phase = w_head_q_phase.view(qlen, bsz, self.n_head, self.d_head)  # qlen x bsz x n_head x d_head
 
-        attn = attn.transpose(1, 0).contiguous().view(input_len, batch_size, self.n_embed).transpose(1, 0)
-        attn = self.out_proj(attn)
+        w_head_k_real = w_head_k_real.view(klen, bsz, self.n_head, self.d_head)  # qlen x bsz x n_head x d_head
+        w_head_k_phase = w_head_k_phase.view(klen, bsz, self.n_head, self.d_head)  # qlen x bsz x n_head x d_head
 
-        return attn
+        w_head_v_real = w_head_v_real.view(klen, bsz, self.n_head, self.d_head)  # qlen x bsz x n_head x d_head
+        w_head_v_phase = w_head_v_phase.view(klen, bsz, self.n_head, self.d_head)  # qlen x bsz x n_head x d_head
 
-    def softmax_variants(self, input, attn_mask=None, sm_variante='real'):
-        if sm_variante == 'real':
-            return self.softmax_real(input, attn_mask=attn_mask)
-        elif sm_variante == 'abs':
-            return self.softmax_abs(input, attn_mask=attn_mask)
-        elif sm_variante == 'naiv':
-            return self.softmax_naiv(input, attn_mask=attn_mask)
-        elif sm_variante == 'absonly':
-            return self.softmax_abs_only(input, attn_mask=attn_mask)
+        r_head_k = r_head_k.view(rlen, self.n_head, self.d_head)  # qlen x n_head x d_head
+
+        #### compute attention score
+        rw_head_q_real = w_head_q_real + r_w_bias  # qlen x bsz x n_head x d_head
+        rw_head_q_phase = w_head_q_phase + r_w_bias  # qlen x bsz x n_head x d_head
+
+        AC_real = torch.einsum('ibnd,jbnd->ijbn', (rw_head_q_real, w_head_k_real)) - torch.einsum('ibnd,jbnd->ijbn', (
+        rw_head_q_phase, w_head_k_phase))  # qlen x klen x bsz x n_head
+        AC_phase = torch.einsum('ibnd,jbnd->ijbn', (rw_head_q_real, w_head_k_phase)) + torch.einsum('ibnd,jbnd->ijbn', (
+        rw_head_q_real, w_head_k_phase))  # qlen x klen x bsz x n_head
+
+        rr_head_q_real = w_head_q_real + r_r_bias
+        rr_head_q_phase = w_head_q_phase + r_r_bias
+
+        BD_real = torch.einsum('ibnd,jnd->ijbn', (rr_head_q_real, r_head_k))  # qlen x klen x bsz x n_head
+        BD_phase = torch.einsum('ibnd,jnd->ijbn', (rr_head_q_phase, r_head_k))  # qlen x klen x bsz x n_head
+
+        BD_real = self._rel_shift(BD_real)
+        BD_phase = self._rel_shift(BD_phase)
+
+        # [qlen x klen x bsz x n_head]
+        AC = AC_real * AC_real + AC_phase * AC_phase
+        AC = torch.sqrt(AC)
+
+        BD = BD_real * BD_real + BD_phase * BD_phase
+        BD = torch.sqrt(BD)
+
+        attn_score = AC + BD
+
+        attn_score.mul_(self.scale)
+        #### compute attention probability
+        if attn_mask is not None and attn_mask.any().item():
+            if attn_mask.dim() == 2:
+                attn_score = attn_score.float().masked_fill(
+                    attn_mask[None, :, :, None], -float('inf')).type_as(attn_score)
+            elif attn_mask.dim() == 3:
+                attn_score = attn_score.float().masked_fill(
+                    attn_mask[:, :, :, None], -float('inf')).type_as(attn_score)
+
+        # [qlen x klen x bsz x n_head]
+        attn_prob = F.softmax(attn_score, dim=1)
+        attn_prob = self.dropatt(attn_prob)
+
+        #### compute attention vector
+        attn_vec_real = torch.einsum('ijbn,jbnd->ibnd', (attn_prob, w_head_v_real))
+        attn_vec_phase = torch.einsum('ijbn,jbnd->ibnd', (attn_prob, w_head_v_phase))
+
+        # [qlen x bsz x n_head x d_head]
+
+        attn_vec_real = attn_vec_real.contiguous().view(attn_vec_real.size(0), attn_vec_real.size(1),
+                                                        self.n_head * self.d_head)
+        attn_vec_phase = attn_vec_phase.contiguous().view(attn_vec_phase.size(0), attn_vec_phase.size(1),
+                                                          self.n_head * self.d_head)
+
+        ##### linear projection
+        attn_out_real = self.o_net(attn_vec_real)
+        attn_out_phase = self.o_net1(attn_vec_phase)
+        attn_out_real = self.drop(attn_out_real)
+        attn_out_phase = self.drop(attn_out_phase)
+
+        if self.pre_lnorm:
+            ##### residual connection
+            output_real = attn_out_real
+            output_phase = attn_out_phase
         else:
-            raise ValueError(f'{sm_variante} is not a valid variant for C-softmax')
+            ##### residual connection + layer normalization
+            output_real = self.layer_norm(w_real + attn_out_real)
+            output_phase = self.layer_norm(w_phase + attn_out_phase)
 
-    def softmax_abs(self, input, attn_mask=None):
-        abso = torch.abs(input)
-        if attn_mask is not None:
-            abso += attn_mask.unsqueeze(0).real.to(self.device)
-        return softmax(abso, dim=-1).type(torch.complex64) * torch.sgn(input)
 
-    def softmax_naiv(self, input, attn_mask=None):
-        if attn_mask is not None:
-            # input += attn_mask.unsqueeze(0).to(self.device)
-            input = torch.complex(input.real + attn_mask.unsqueeze(0).to(self.device).real, input.imag + attn_mask.unsqueeze(0).to(self.device).imag)
-        return torch.complex(softmax(input.real, dim=-1), softmax(input.imag, dim=-1))
-
-    def softmax_abs_only(self, input, attn_mask=None):
-        abso = torch.abs(input)
-        if attn_mask is not None:
-            abso += attn_mask.unsqueeze(0).real.to(self.device)
-        # abso[abso == float('inf')] = -abso[abso == float('inf')]
-        return softmax(abso, dim=-1).type(torch.complex64)
-
-    def softmax_real(self, input, attn_mask=None):
-        real = torch.real(input)
-        if attn_mask is not None:
-            real += attn_mask.unsqueeze(0).real.to(self.device)
-        # abso[abso == float('inf')] = -abso[abso == float('inf')]
-        return softmax(real, dim=-1).type(torch.complex64)
-
-    def min_max_real(self, input, attn_mask=None):  # attnmask does not work yet
-        real = torch.real(input)
-        mini = torch.min(real, dim=-1)[0].unsqueeze(-1)
-        maxi = torch.max(real, dim=-1)[0].unsqueeze(-1)
-        return ((real - mini) / (maxi - mini)).type(torch.complex64)
-
-    def min_max_naiv(self, input, attn_mask=None):  # attnmask does not work yet
-        real = torch.real(input)
-        rmini = torch.min(real, dim=-1)
-        rmaxi = torch.max(real, dim=-1)
-        imag = torch.imag(input)
-        imini = torch.min(imag, dim=-1)
-        imaxi = torch.max(imag, dim=-1)
-        return torch.complex((real - rmini) / (rmaxi - rmini), (imag - imini) / (imaxi - imini))
-
-    def min_max_complex(self, input, attn_mask=None):  # attnmask does not work yet
-        mini = torch.take_along_dim(input, torch.argmin(input.real, dim=-1, keepdims=True), dim=-1).unsqueeze(-1)
-        pos = input - mini
-        maxi = torch.take_along_dim(input, torch.argmax(torch.abs(pos), dim=-1, keepdims=True), dim=-1).unsqueeze(-1)
-        return pos / maxi
-
-    def generate_square_subsequent_mask(self, sz):
-        mask = (torch.triu(torch.ones((sz, sz))) == 1).transpose(0, 1)
-        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
-        return torch.complex(mask, mask)
-    
+        return output_real, output_phase

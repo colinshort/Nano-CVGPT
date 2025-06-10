@@ -18,7 +18,7 @@ class CVGPT(nn.Module):  # Transformer for sequence generation
 
         # learned embedding that is a function of token index and position
         self.embedding = AdaptiveEmbedding(vocab_size, n_embed, d_proj=n_embed, cutoffs=[], div_val=1)
-        self.blocks = nn.Sequential(*[ComplexBlock(self.n_embed, self.n_head, self.dropout, device=self.device) for _ in range(self.n_layer)])
+        self.blocks = nn.Sequential(*[ComplexBlock(self.n_embed, self.n_head, self.n_embed // self.n_head, 4 * self.n_embed, self.dropout, device=self.device) for _ in range(self.n_layer)])
         self.ln_f = ComplexLayerNorm(self.n_embed, device=device) # final layer norm
         self.lm_head = ComplexLinear(self.n_embed, self.vocab_size)
 
@@ -27,9 +27,21 @@ class CVGPT(nn.Module):  # Transformer for sequence generation
 
         # idx and targets are both (B,T) tensor of integers
         x = self.embedding(idx).type(torch.complex64) # (B,T,C)
+        print("POST EMBEDDING")
+        print(x.shape, x.dtype, x)
+        print("=" * 10)
         x = self.blocks(x) # (B,T,C)
+        print("POST BLOCKS")
+        print(x.shape, x.dtype, x)
+        print("=" * 10)
         x = self.ln_f(x) # (B,T,C)
+        print("POST LAYER NORM")
+        print(x.shape, x.dtype, x)
+        print("=" * 10)
         logits = self.lm_head(x).real # (B,T,vocab_size)
+        print("POST MLP")
+        print(logits.shape, logits.dtype, logits)
+        print("=" * 10)
 
         if targets is None:
             loss = None
@@ -57,5 +69,5 @@ class CVGPT(nn.Module):  # Transformer for sequence generation
             # append sampled index to the running sequence
             idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
         return idx
-        
+
 
